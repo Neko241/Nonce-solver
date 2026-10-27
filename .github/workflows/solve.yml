@@ -1,0 +1,47 @@
+name: solve
+on:
+  push:
+    paths: ['jobs/*.cnf.gz']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  solve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 17
+    strategy:
+      fail-fast: false
+      matrix:
+        r: ${{ fromJSON(github.event.repository.private && '[0,1,2,3]' || '[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - name: solve
+        shell: bash {0}
+        run: |
+          id=$(git diff --name-only HEAD~1 HEAD | grep 'jobs/.*\.cnf\.gz' | head -1 | xargs -r basename | sed 's/\.cnf\.gz$//')
+          [ -z "$id" ] && id=$(ls -t jobs/*.cnf.gz | head -1 | xargs basename | sed 's/\.cnf\.gz$//')
+          [ -e "results/$id.txt" ] && exit 0
+          sec=$(cat jobs/$id.sec 2>/dev/null || echo 800)
+          gcc -O3 -march=native -o /tmp/probsat probsat.c -lm
+          gunzip -c jobs/$id.cnf.gz > /tmp/p.cnf
+          N=$(nproc); echo "job $id sec=$sec cores=$N r=${{ matrix.r }}"
+          cbs=(5.5 6.5 6.0 5.0 7.0 5.8 6.2 4.8 5.3 6.8 5.7 6.3)
+          pids=()
+          for i in $(seq 0 $((N-1))); do k=$(( (${{ matrix.r }}*N+i) % 12 ))
+            ( /tmp/probsat /tmp/p.cnf $((RANDOM*31+${{ matrix.r }}*1000+i)) $sec ${cbs[$k]} > /tmp/res.$i ) & pids+=($!); done
+          end=$((SECONDS+sec+5)); win=""; c=0
+          while [ $SECONDS -lt $end ]; do
+            for f in /tmp/res.*; do grep -q SATISFIABLE "$f" 2>/dev/null && win=$f && break; done
+            [ -n "$win" ] && break
+            alive=0; for p in "${pids[@]}"; do kill -0 $p 2>/dev/null && alive=1; done; [ $alive = 0 ] && break
+            c=$((c+1)); if [ $((c%15)) = 0 ]; then git fetch -q origin main && git cat-file -e origin/main:results/$id.txt 2>/dev/null && { echo "solved elsewhere"; kill "${pids[@]}"; exit 0; }; fi
+            sleep 1
+          done
+          kill "${pids[@]}" 2>/dev/null
+          [ -z "$win" ] && { echo "no solution"; exit 0; }
+          echo "SAT $id"
+          git config user.email "actions@nonce.local"; git config user.name "nonce-actions"
+          mkdir -p results; grep '^v ' "$win" | cut -c3- > results/$id.txt
+          git add results/$id.txt; git commit -qm "result $id (actions r${{ matrix.r }})"
+          for t in 1 2 3 4 5; do git pull -q --rebase origin main && git push -q origin HEAD:main && break; sleep 2; done
